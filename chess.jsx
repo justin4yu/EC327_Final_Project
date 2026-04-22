@@ -112,6 +112,10 @@ export default function Chess() {
   const [lastMove,setLastMove]=useState(null);
   const [flipped,setFlipped]=useState(false);
 
+  const [playerColor] = useState('w');
+  const agentColor = playerColor === 'w' ? 'b' : 'w';
+
+
   const reset = () => {
     setBoard(initBoard()); setSel(null); setValid([]); setTurn('w');
     setEp(null); setCas({wK:true,wQ:true,bK:true,bQ:true});
