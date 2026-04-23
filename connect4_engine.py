@@ -189,6 +189,7 @@ class GameUI:
 if __name__ == "__main__":
     env = Connect4Env()
     my_agent = RLAgent()
+    my_agent.epsilon = 0.0
     
     # Start Interactive Play
     ui = GameUI(env, my_agent)
