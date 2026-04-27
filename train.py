@@ -1,140 +1,171 @@
 # train.py
 """
-Headless self-play training loop for the Q-Learning Connect 4 agent.
+Headless self-play training loop for the DQN Connect 4 agent.
+
+The DQN agent (piece 2) trains against a Minimax opponent (piece 1) at
+depth=1. This is much better than pure self-play early on because:
+  - A random opponent teaches nothing about real threats
+  - A strong Minimax (depth 5+) crushes the untrained agent every game,
+    giving only loss signals and slow learning
+  - Minimax depth=1 plays sensibly (wins/blocks if it can in one move)
+    but is beatable, giving the DQN a mix of wins, losses and draws to
+    learn from
+
+Once the agent is trained you can increase OPPONENT_DEPTH to keep it
+challenged, or switch to self-play by setting OPPONENT = "self".
 
 Run:
+    pip install torch numpy pygame
     python train.py
 
-The script pits Agent-2 (the learner) against Agent-1 (a copy that also
-learns — self-play), so both players improve together. After training you can
-play against the saved Q-table by running:
+Then play:
     python connect4_engine.py
 """
 
+import math
+import random
 import numpy as np
 from connect4_engine import Connect4Env
 from agent import RLAgent
 
-# ── Reward shaping constants ─────────────────────────────────────────────────
-R_WIN          =  1.0    # agent wins the game
-R_LOSS         = -1.0    # agent loses
-R_DRAW         =  0.5    # board is full, no winner
-R_HEURISTIC    =  0.01   # weight applied to engine's heuristic delta each step
+# ── Config ─────────────────────────────────────────────────────────────────────
+NUM_EPISODES   = 300_000  # run to 300k total for a strong agent
+OPPONENT_DEPTH = 2        # depth 2 now that agent has baseline skill at 78k
 
-# ── Training config ───────────────────────────────────────────────────────────
-NUM_EPISODES   = 200_000  # total self-play games
-PRINT_EVERY    = 500     # console log frequency (also triggers a checkpoint)
+# ── Rewards ────────────────────────────────────────────────────────────────────
+R_WIN   =  1.0
+R_LOSS  = -1.0
+R_DRAW  =  0.3   # small positive: a draw vs minimax is respectable
 
 
-def shaped_reward(env: Connect4Env, piece: int) -> float:
-    """Small intermediate reward derived from the engine's board heuristic."""
-    score, _ = env.get_reward_and_features(piece)
-    return score * R_HEURISTIC
+# ── Minimax opponent (no learning, just a fixed policy) ────────────────────────
 
+def minimax(board, depth, alpha, beta, maximizing, piece):
+    """Lightweight minimax used as the training opponent."""
+    valid = [c for c in range(7) if board[5][c] == 0]
+
+    def winning(b, p):
+        for r in range(6):
+            for c in range(4):
+                if all(b[r][c+i] == p for i in range(4)): return True
+        for c in range(7):
+            for r in range(3):
+                if all(b[r+i][c] == p for i in range(4)): return True
+        for r in range(3):
+            for c in range(4):
+                if all(b[r+i][c+i] == p for i in range(4)): return True
+        for r in range(3, 6):
+            for c in range(4):
+                if all(b[r-i][c+i] == p for i in range(4)): return True
+        return False
+
+    opp = 2 if piece == 1 else 1
+    if winning(board, piece): return  1_000_000
+    if winning(board, opp):   return -1_000_000
+    if not valid or depth == 0: return 0
+
+    if maximizing:
+        val = -math.inf
+        for col in valid:
+            row = next(r for r in range(6) if board[r][col] == 0)
+            temp = board.copy(); temp[row][col] = piece
+            val = max(val, minimax(temp, depth-1, alpha, beta, False, piece))
+            alpha = max(alpha, val)
+            if alpha >= beta: break
+        return val
+    else:
+        val = math.inf
+        for col in valid:
+            row = next(r for r in range(6) if board[r][col] == 0)
+            temp = board.copy(); temp[row][col] = opp
+            val = min(val, minimax(temp, depth-1, alpha, beta, True, piece))
+            beta = min(beta, val)
+            if alpha >= beta: break
+        return val
+
+
+def minimax_action(board, depth, piece):
+    valid = [c for c in range(7) if board[5][c] == 0]
+    best_col, best_score = valid[0], -math.inf
+    for col in valid:
+        row = next(r for r in range(6) if board[r][col] == 0)
+        temp = board.copy(); temp[row][col] = piece
+        score = minimax(temp, depth-1, -math.inf, math.inf, False, piece)
+        if score > best_score:
+            best_score, best_col = score, col
+    return best_col
+
+
+# ── Training loop ──────────────────────────────────────────────────────────────
 
 def run_training():
-    env      = Connect4Env()
-    # Two independent Q-agents: agent1 plays piece=1, agent2 plays piece=2
-    # agent2 is the one we ultimately save and use in the UI
-    agent1   = RLAgent(q_table_path="q_table_p1.pkl")
-    agent2   = RLAgent(q_table_path="q_table.pkl")   # <── used by the engine UI
-
-    agents   = {1: agent1, 2: agent2}
-    pieces   = {1: 1,      2: 2}
+    env   = Connect4Env()
+    agent = RLAgent()   # DQN agent, plays as piece 2
 
     for ep in range(1, NUM_EPISODES + 1):
         state = env.reset()
-        prev  = {1: None, 2: None}   # stores (state, action) for delayed update
-        turn  = 1                     # piece 1 goes first
+        turn  = 1        # piece 1 (minimax opponent) goes first
+        prev_state  = None
+        prev_action = None
 
         while not env.game_over:
-            agent       = agents[turn]
-            piece       = pieces[turn]
-            valid_moves = env.get_valid_locations()
-
-            if not valid_moves:
-                # Board is full → draw
-                for p in (1, 2):
-                    if prev[p] is not None:
-                        agents[p].train_step(*prev[p], R_DRAW, env.board.copy(), True, [])
-                    agents[p].end_episode("draw")
+            valid = env.get_valid_locations()
+            if not valid:
+                # Draw
+                if prev_state is not None:
+                    agent.train_step(prev_state, prev_action, R_DRAW,
+                                     env.board.copy(), True)
+                agent.end_episode("draw")
                 break
 
-            _, features = env.get_reward_and_features(piece)
-            action      = agent.get_action(state.copy(), valid_moves, features)
+            # ── Opponent turn (Minimax, piece 1) ──────────────────────────
+            if turn == 1:
+                col = minimax_action(env.board, OPPONENT_DEPTH, piece=1)
+                row = env.get_next_open_row(col)
+                env.drop_piece(row, col, 1)
 
-            row = env.get_next_open_row(action)
-            env.drop_piece(row, action, piece)
-            next_state = env.board.copy()
+                if env.winning_move(1):
+                    env.game_over = True
+                    # The agent's last move led to this loss
+                    if prev_state is not None:
+                        agent.train_step(prev_state, prev_action, R_LOSS,
+                                         env.board.copy(), True)
+                    agent.end_episode("loss")
+                    break
 
-            # ── check for win ─────────────────────────────────────────────
-            if env.winning_move(piece):
-                env.game_over = True
-                winner_piece  = piece
-                loser_piece   = 2 if piece == 1 else 1
+                turn = 2
 
-                # Update the winner's last transition with +WIN reward
-                if prev[piece] is not None:
-                    agents[piece].train_step(
-                        *prev[piece], R_WIN, next_state, True, []
-                    )
-                else:
-                    # First move happened to win (very rare)
-                    agents[piece].train_step(
-                        state.copy(), action, R_WIN, next_state, True, []
-                    )
+            # ── Agent turn (DQN, piece 2) ──────────────────────────────────
+            else:
+                _, features = env.get_reward_and_features(piece=2)
+                col         = agent.get_action(env.board.copy(), valid, features)
+                row         = env.get_next_open_row(col)
 
-                # Update the loser's last transition with -LOSS reward
-                if prev[loser_piece] is not None:
-                    agents[loser_piece].train_step(
-                        *prev[loser_piece], R_LOSS, next_state, True, []
-                    )
+                board_before = env.board.copy()
+                env.drop_piece(row, col, 2)
+                board_after  = env.board.copy()
 
-                agents[piece].end_episode("win")
-                agents[loser_piece].end_episode("loss")
-                break
+                if env.winning_move(2):
+                    env.game_over = True
+                    agent.train_step(board_before, col, R_WIN, board_after, True)
+                    agent.end_episode("win")
+                    break
 
-            # ── check for draw after this move (board just became full) ────
-            next_valid_moves = env.get_valid_locations()
-            if not next_valid_moves:
-                env.game_over = True
-                other_piece = 2 if piece == 1 else 1
+                # Non-terminal: store this transition; we'll update it next
+                # agent turn with the real next-state (after opponent replies)
+                if prev_state is not None:
+                    agent.train_step(prev_state, prev_action, 0.0,
+                                     board_after, False)
 
-                if prev[piece] is not None:
-                    agents[piece].train_step(*prev[piece], R_DRAW, next_state, True, [])
-                agents[piece].train_step(state.copy(), action, R_DRAW, next_state, True, [])
-
-                if prev[other_piece] is not None:
-                    agents[other_piece].train_step(*prev[other_piece], R_DRAW, next_state, True, [])
-
-                agents[piece].end_episode("draw")
-                agents[other_piece].end_episode("draw")
-                break
-
-            # ── mid-game: update the *previous* player's transition ───────
-            # We can only give a meaningful next-state reward once we know
-            # the opponent has moved and not won, so we do a one-step delay.
-            step_reward = shaped_reward(env, piece)
-
-            if prev[piece] is not None:
-                agents[piece].train_step(
-                    *prev[piece],
-                    step_reward,
-                    next_state.copy(),
-                    False,
-                    next_valid_moves,
-                )
-
-            prev[piece]  = (state.copy(), action)
-            state        = next_state
-            turn         = 2 if turn == 1 else 1   # swap turns
+                prev_state  = board_before
+                prev_action = col
+                turn = 1
 
     # Final save
-    agent2.save_q_table()
-    agent1.save_q_table()
-    print("\n✓ Training complete. Q-tables saved.")
-    print(f"  agent2 (UI opponent):  W={agent2.wins}  L={agent2.losses}  D={agent2.draws}")
-    print(f"  |Q-table| = {len(agent2.q_table)} unique states visited")
+    agent.save_q_table()
+    print("\nTraining complete.")
+    print(f"  W={agent.wins}  L={agent.losses}  D={agent.draws}")
+    print(f"  Replay buffer size: {len(agent.replay)}")
 
 
 if __name__ == "__main__":
