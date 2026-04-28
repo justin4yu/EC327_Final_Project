@@ -1,9 +1,15 @@
 # connect4_engine.py
 import numpy as np
-import pygame
 import sys
 import math
 from agent import RLAgent
+
+# Try to import pygame, if not available, use a text-based UI
+try:
+    import pygame
+    pygame_available = True
+except ImportError:
+    pygame_available = False
 
 # Colors for UI
 BLUE = (0, 0, 255)
@@ -110,21 +116,43 @@ class Connect4Env:
 
 class GameUI:
     def __init__(self, env, agent):
-        pygame.init()
         self.env = env
         self.agent = agent
-        self.width = COLS * SQUARESIZE
-        self.height = (ROWS + 1) * SQUARESIZE
-        self.screen = pygame.display.set_mode((self.width, self.height))
-        self.radius = int(SQUARESIZE / 2 - 5)
-        pygame.display.set_caption("RL Connect 4 Testbed")
+        if pygame_available:
+            pygame.init()
+            self.width = COLS * SQUARESIZE
+            self.height = (ROWS + 1) * SQUARESIZE
+            self.screen = pygame.display.set_mode((self.width, self.height))
+            self.radius = int(SQUARESIZE / 2 - 5)
+            pygame.display.set_caption("RL Connect 4 Testbed")
+        else:
+            print("Pygame not available, using text-based interface")
 
     def draw_board(self):
+        if not pygame_available:
+            # Text-based board display
+            print("\n" + "="*21)
+            for r in range(ROWS):
+                print("|", end="")
+                for c in range(COLS):
+                    if self.env.board[r][c] == 0:
+                        print(" ", end="")
+                    elif self.env.board[r][c] == 1:
+                        print("R", end="")  # Red for human
+                    elif self.env.board[r][c] == 2:
+                        print("Y", end="")  # Yellow for AI
+                    print("|", end="")
+                print()
+            print("="*21)
+            print(" 0 1 2 3 4 5 6")
+            return
+
+        # Original pygame-based drawing
         for c in range(COLS):
             for r in range(ROWS):
                 pygame.draw.rect(self.screen, BLUE, (c*SQUARESIZE, r*SQUARESIZE+SQUARESIZE, SQUARESIZE, SQUARESIZE))
                 pygame.draw.circle(self.screen, BLACK, (int(c*SQUARESIZE+SQUARESIZE/2), int(r*SQUARESIZE+SQUARESIZE+SQUARESIZE/2)), self.radius)
-        
+
         for c in range(COLS):
             for r in range(ROWS):
                 if self.env.board[r][c] == 1:
@@ -134,26 +162,50 @@ class GameUI:
         pygame.display.update()
 
     def play(self):
-        self.draw_board()
-        turn = 0 # 0 = Human, 1 = Agent
-        font = pygame.font.SysFont("monospace", 75)
+        if pygame_available:
+            self.draw_board()
+            turn = 0 # 0 = Human, 1 = Agent
+            font = pygame.font.SysFont("monospace", 75)
 
-        while not self.env.game_over:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    sys.exit()
+            while not self.env.game_over:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        sys.exit()
 
-                # HUMAN TURN
-                if event.type == pygame.MOUSEBUTTONDOWN and turn == 0:
-                    posx = event.pos[0]
-                    col = int(math.floor(posx / SQUARESIZE))
+                    # HUMAN TURN
+                    if event.type == pygame.MOUSEBUTTONDOWN and turn == 0:
+                        posx = event.pos[0]
+                        col = int(math.floor(posx / SQUARESIZE))
+
+                        if self.env.is_valid_location(col):
+                            row = self.env.get_next_open_row(col)
+                            self.env.drop_piece(row, col, 1)
+
+                            if self.env.winning_move(1):
+                                label = font.render("Human wins!!", 1, RED)
+                                self.screen.blit(label, (40, 10))
+                                self.env.game_over = True
+
+                            turn += 1
+                            turn = turn % 2
+                            self.draw_board()
+
+                # AGENT TURN
+                if turn == 1 and not self.env.game_over:
+                    # 1. Get valid moves & features
+                    valid_moves = self.env.get_valid_locations()
+                    _, features = self.env.get_reward_and_features(piece=2)
+
+                    # 2. Ask your RL Agent for a move
+                    col = self.agent.get_action(self.env.board.copy(), valid_moves, features)
 
                     if self.env.is_valid_location(col):
+                        pygame.time.wait(500) # Slight delay so you can see the move
                         row = self.env.get_next_open_row(col)
-                        self.env.drop_piece(row, col, 1)
+                        self.env.drop_piece(row, col, 2)
 
-                        if self.env.winning_move(1):
-                            label = font.render("Human wins!!", 1, RED)
+                        if self.env.winning_move(2):
+                            label = font.render("Agent wins!!", 1, YELLOW)
                             self.screen.blit(label, (40, 10))
                             self.env.game_over = True
 
@@ -161,30 +213,71 @@ class GameUI:
                         turn = turn % 2
                         self.draw_board()
 
-            # AGENT TURN
-            if turn == 1 and not self.env.game_over:
-                # 1. Get valid moves & features
-                valid_moves = self.env.get_valid_locations()
-                _, features = self.env.get_reward_and_features(piece=2)
-                
-                # 2. Ask your RL Agent for a move
-                col = self.agent.get_action(self.env.board.copy(), valid_moves, features)
-                
-                if self.env.is_valid_location(col):
-                    pygame.time.wait(500) # Slight delay so you can see the move
-                    row = self.env.get_next_open_row(col)
-                    self.env.drop_piece(row, col, 2)
+            pygame.time.wait(3000)
+        else:
+            # Text-based gameplay
+            print("Starting Connect 4 game (text-based)")
+            print("You are Red (R), AI is Yellow (Y)")
+            print("Enter column number (0-6) to make your move")
 
-                    if self.env.winning_move(2):
-                        label = font.render("Agent wins!!", 1, YELLOW)
-                        self.screen.blit(label, (40, 10))
-                        self.env.game_over = True
+            turn = 0  # 0 = Human, 1 = Agent
 
-                    turn += 1
-                    turn = turn % 2
+            while not self.env.game_over:
+                self.draw_board()
+
+                if turn == 0:  # Human turn
+                    try:
+                        col_input = input("Your move (column 0-6): ").strip()
+                        if col_input.lower() in ['quit', 'exit', 'q']:
+                            print("Game ended by user.")
+                            break
+                        col = int(col_input)
+
+                        if col < 0 or col > 6:
+                            print("Please enter a number between 0 and 6")
+                            continue
+
+                        if not self.env.is_valid_location(col):
+                            print("Column is full! Try another column.")
+                            continue
+
+                    except ValueError:
+                        print("Please enter a valid number")
+                        continue
+                    except KeyboardInterrupt:
+                        print("\nGame ended by user.")
+                        break
+                else:  # Agent turn
+                    print("AI is thinking...")
+                    valid_moves = self.env.get_valid_locations()
+                    col = self.agent.get_action(self.env.board.copy(), valid_moves, None)
+                    print(f"AI chooses column {col}")
+
+                # Execute the move
+                row = self.env.get_next_open_row(col)
+                self.env.drop_piece(row, col, 1 if turn == 0 else 2)
+
+                # Check for win
+                if self.env.winning_move(1 if turn == 0 else 2):
                     self.draw_board()
+                    if turn == 0:
+                        print("Congratulations! You win!")
+                    else:
+                        print("AI wins! Better luck next time.")
+                    self.env.game_over = True
+                    break
 
-        pygame.time.wait(3000)
+                # Check for draw
+                if len(self.env.get_valid_locations()) == 0:
+                    self.draw_board()
+                    print("It's a draw!")
+                    self.env.game_over = True
+                    break
+
+                # Switch turns
+                turn = 1 - turn
+
+            print("Game over.")
 
 if __name__ == "__main__":
     env = Connect4Env()
