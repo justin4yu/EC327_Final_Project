@@ -3,13 +3,34 @@ import numpy as np
 import pygame
 import sys
 import math
-from agent import RLAgent
+import os
+import random
+import tkinter as tk
+from tkinter import filedialog
+
+# Dynamically import both agents and print the exact errors if they fail
+try:
+    from q_agent import RLAgent as QAgent
+    print("SUCCESS: q_agent.py loaded perfectly.")
+except Exception as e:
+    print(f"CRITICAL ERROR loading q_agent.py: {e}")
+    QAgent = None
+
+try:
+    from cnn_agent import RLAgent as CNNAgent
+    print("SUCCESS: cnn_agent.py loaded perfectly.")
+except Exception as e:
+    print(f"CRITICAL ERROR loading cnn_agent.py: {e}")
+    CNNAgent = None
 
 # Colors for UI
 BLUE = (0, 0, 255)
 BLACK = (0, 0, 0)
-RED = (255, 0, 0)      # Human
-YELLOW = (255, 255, 0) # AI Agent
+RED = (255, 0, 0)      
+YELLOW = (255, 255, 0) 
+WHITE = (255, 255, 255)
+GRAY = (150, 150, 150)
+GREEN = (0, 200, 0)
 
 ROWS = 6
 COLS = 7
@@ -42,84 +63,124 @@ class Connect4Env:
     def winning_move(self, piece, board=None):
         if board is None:
             board = self.board
-        # Horizontal
         for c in range(COLS-3):
             for r in range(ROWS):
                 if board[r][c] == piece and board[r][c+1] == piece and board[r][c+2] == piece and board[r][c+3] == piece:
                     return True
-        # Vertical
         for c in range(COLS):
             for r in range(ROWS-3):
                 if board[r][c] == piece and board[r+1][c] == piece and board[r+2][c] == piece and board[r+3][c] == piece:
                     return True
-        # Positive Diagonal
         for c in range(COLS-3):
             for r in range(ROWS-3):
                 if board[r][c] == piece and board[r+1][c+1] == piece and board[r+2][c+2] == piece and board[r+3][c+3] == piece:
                     return True
-        # Negative Diagonal
         for c in range(COLS-3):
             for r in range(3, ROWS):
                 if board[r][c] == piece and board[r-1][c+1] == piece and board[r-2][c+2] == piece and board[r-3][c+3] == piece:
                     return True
         return False
 
-    def evaluate_window(self, window, piece):
-        score = 0
-        opp_piece = 1 if piece == 2 else 2
-
-        if window.count(piece) == 4:
-            score += 100
-        elif window.count(piece) == 3 and window.count(0) == 1:
-            score += 5
-        elif window.count(piece) == 2 and window.count(0) == 2:
-            score += 2
-
-        if window.count(opp_piece) == 3 and window.count(0) == 1:
-            score -= 50 # Strongly penalize ignoring opponent threats
-
-        return score
-
-    def get_reward_and_features(self, piece):
-        """Calculates shaped reward and extracts 'Mario Kart' style features"""
-        score = 0
-        
-        # Feature 1: Center Control
-        center_array = [int(i) for i in list(self.board[:, COLS//2])]
-        center_count = center_array.count(piece)
-        score += center_count * 2
-
-        # Evaluate all windows for 3-in-a-rows (Threats)
-        for r in range(ROWS):
-            row_array = [int(i) for i in list(self.board[r,:])]
-            for c in range(COLS-3):
-                window = row_array[c:c+4]
-                score += self.evaluate_window(window, piece)
-
-        for c in range(COLS):
-            col_array = [int(i) for i in list(self.board[:,c])]
-            for r in range(ROWS-3):
-                window = col_array[r:r+4]
-                score += self.evaluate_window(window, piece)
-
-        features = {
-            "center_pieces": center_count,
-            "heuristic_score": score
-        }
-        return score, features
-
 class GameUI:
-    def __init__(self, env, agent):
+    def __init__(self, env):
         pygame.init()
         self.env = env
-        self.agent = agent
         self.width = COLS * SQUARESIZE
         self.height = (ROWS + 1) * SQUARESIZE
         self.screen = pygame.display.set_mode((self.width, self.height))
         self.radius = int(SQUARESIZE / 2 - 5)
-        pygame.display.set_caption("RL Connect 4 Testbed")
+        pygame.display.set_caption("Connect 4 AI Arena")
+        self.font = pygame.font.SysFont("monospace", 50, bold=True)
+        self.small_font = pygame.font.SysFont("monospace", 25, bold=True)
+        
+        # Menu State
+        self.human_first = True
+        self.model_path = None
+        self.agent = None
+        self.model_name = "Random Moves (No Model)"
+
+    def open_file_dialog(self):
+        root = tk.Tk()
+        root.withdraw() 
+        root.attributes('-topmost', True) 
+        filepath = filedialog.askopenfilename(
+            title="Select Trained Model",
+            filetypes=(("PyTorch CNN", "*.pth"), ("Q-Table", "*.pkl"), ("All files", "*.*"))
+        )
+        root.destroy()
+        return filepath
+
+    def load_model(self, filepath):
+        if not filepath:
+            return
+        
+        ext = os.path.splitext(filepath)[1].lower()
+        self.model_path = filepath
+        self.model_name = os.path.basename(filepath)
+
+        if ext == '.pkl' and QAgent:
+            self.agent = QAgent(epsilon=0.0)
+            self.agent.load(filepath)
+            print(f"Loaded Q-Table: {self.model_name}")
+        elif ext == '.pth' and CNNAgent:
+            self.agent = CNNAgent(epsilon=0.0)
+            self.agent.load(filepath)
+            print(f"Loaded CNN: {self.model_name}")
+        else:
+            print("Failed to load. Unknown file type or missing agent file.")
+            self.agent = None
+            self.model_name = "Load Failed - Playing Randomly"
+
+    def draw_text(self, text, font, color, y_offset):
+        surface = font.render(text, True, color)
+        rect = surface.get_rect(center=(self.width/2, y_offset))
+        self.screen.blit(surface, rect)
+
+    def main_menu(self):
+        menu_running = True
+        
+        # Define button rects
+        btn_width = 350
+        btn_height = 60
+        btn_x = (self.width - btn_width) // 2
+        
+        turn_btn = pygame.Rect(btn_x, 250, btn_width, btn_height)
+        model_btn = pygame.Rect(btn_x, 350, btn_width, btn_height)
+        start_btn = pygame.Rect(btn_x, 500, btn_width, btn_height)
+
+        while menu_running:
+            self.screen.fill(BLACK)
+            
+            self.draw_text("CONNECT 4 SETUP", self.font, WHITE, 100)
+            self.draw_text(f"Current Model: {self.model_name}", self.small_font, YELLOW, 170)
+
+            # Draw Buttons
+            pygame.draw.rect(self.screen, GRAY, turn_btn)
+            pygame.draw.rect(self.screen, GRAY, model_btn)
+            pygame.draw.rect(self.screen, GREEN, start_btn)
+
+            turn_text = "Turn: Human First" if self.human_first else "Turn: AI First"
+            self.draw_text(turn_text, self.small_font, BLACK, 280)
+            self.draw_text("Select Model File", self.small_font, BLACK, 380)
+            self.draw_text("START GAME", self.small_font, BLACK, 530)
+
+            pygame.display.update()
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    sys.exit()
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    pos = event.pos
+                    if turn_btn.collidepoint(pos):
+                        self.human_first = not self.human_first
+                    elif model_btn.collidepoint(pos):
+                        path = self.open_file_dialog()
+                        self.load_model(path)
+                    elif start_btn.collidepoint(pos):
+                        menu_running = False
 
     def draw_board(self):
+        self.screen.fill(BLACK)
         for c in range(COLS):
             for r in range(ROWS):
                 pygame.draw.rect(self.screen, BLUE, (c*SQUARESIZE, r*SQUARESIZE+SQUARESIZE, SQUARESIZE, SQUARESIZE))
@@ -133,10 +194,33 @@ class GameUI:
                     pygame.draw.circle(self.screen, YELLOW, (int(c*SQUARESIZE+SQUARESIZE/2), self.height - int(r*SQUARESIZE+SQUARESIZE/2)), self.radius)
         pygame.display.update()
 
+    def process_move(self, col, piece, name, color):
+        if self.env.is_valid_location(col):
+            row = self.env.get_next_open_row(col)
+            self.env.drop_piece(row, col, piece)
+            
+            # 1. Draw the board first so the new piece appears
+            self.draw_board()
+            
+            # 2. Print the winning text on top if the game ends
+            if self.env.winning_move(piece):
+                label = self.font.render(f"{name} wins!!", 1, color)
+                self.screen.blit(label, (40, 10))
+                pygame.display.update()
+                self.env.game_over = True
+                
+            return True
+        return False
+
     def play(self):
         self.draw_board()
-        turn = 0 # 0 = Human, 1 = Agent
-        font = pygame.font.SysFont("monospace", 75)
+        turn = 0 
+        
+        # Assign pieces based on who goes first
+        human_piece = 1 if self.human_first else 2
+        ai_piece = 2 if self.human_first else 1
+        human_color = RED if human_piece == 1 else YELLOW
+        ai_color = YELLOW if ai_piece == 2 else RED
 
         while not self.env.game_over:
             for event in pygame.event.get():
@@ -144,52 +228,38 @@ class GameUI:
                     sys.exit()
 
                 # HUMAN TURN
-                if event.type == pygame.MOUSEBUTTONDOWN and turn == 0:
+                is_human_turn = (turn == 0 and self.human_first) or (turn == 1 and not self.human_first)
+                
+                if event.type == pygame.MOUSEBUTTONDOWN and is_human_turn:
                     posx = event.pos[0]
                     col = int(math.floor(posx / SQUARESIZE))
-
-                    if self.env.is_valid_location(col):
-                        row = self.env.get_next_open_row(col)
-                        self.env.drop_piece(row, col, 1)
-
-                        if self.env.winning_move(1):
-                            label = font.render("Human wins!!", 1, RED)
-                            self.screen.blit(label, (40, 10))
-                            self.env.game_over = True
-
+                    
+                    if self.process_move(col, human_piece, "Human", human_color):
                         turn += 1
                         turn = turn % 2
-                        self.draw_board()
 
-            # AGENT TURN
-            if turn == 1 and not self.env.game_over:
-                # 1. Get valid moves & features
+            # AI TURN
+            is_ai_turn = (turn == 0 and not self.human_first) or (turn == 1 and self.human_first)
+            
+            if is_ai_turn and not self.env.game_over:
                 valid_moves = self.env.get_valid_locations()
-                _, features = self.env.get_reward_and_features(piece=2)
                 
-                # 2. Ask your RL Agent for a move
-                col = self.agent.get_action(self.env.board.copy(), valid_moves, features)
+                # Use loaded model, or play randomly if none loaded
+                if self.agent:
+                    col = self.agent.get_action(self.env.board.copy(), valid_moves, {})
+                else:
+                    col = random.choice(valid_moves)
                 
-                if self.env.is_valid_location(col):
-                    pygame.time.wait(500) # Slight delay so you can see the move
-                    row = self.env.get_next_open_row(col)
-                    self.env.drop_piece(row, col, 2)
-
-                    if self.env.winning_move(2):
-                        label = font.render("Agent wins!!", 1, YELLOW)
-                        self.screen.blit(label, (40, 10))
-                        self.env.game_over = True
-
+                pygame.time.wait(500) 
+                
+                if self.process_move(col, ai_piece, "Agent", ai_color):
                     turn += 1
                     turn = turn % 2
-                    self.draw_board()
 
         pygame.time.wait(3000)
 
 if __name__ == "__main__":
     env = Connect4Env()
-    my_agent = RLAgent()
-    
-    # Start Interactive Play
-    ui = GameUI(env, my_agent)
+    ui = GameUI(env)
+    ui.main_menu()
     ui.play()
