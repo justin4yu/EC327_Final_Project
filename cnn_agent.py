@@ -191,3 +191,7 @@ class RLAgent:
     def load(self, filepath):
         self.model.load_state_dict(torch.load(filepath, map_location=self.device))
         self.model.eval()
+
+    def decay_epsilon(self):
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
