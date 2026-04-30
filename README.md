@@ -1,3 +1,2 @@
-# EC327_Final_Project
-
-# https://github.com/goodvibs/eval.bar?tab=readme-ov-file
+# Go to branches
+# Valid Branches for models: Heuristic DQN & Actor_Critic
